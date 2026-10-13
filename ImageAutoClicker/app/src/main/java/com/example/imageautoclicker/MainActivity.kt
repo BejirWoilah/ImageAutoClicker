@@ -1,6 +1,19 @@
 package com.example.imageautoclicker
 
+import android.Manifest
+import android.app.Activity
+import android.content.ComponentName
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.BorderStroke
@@ -68,17 +81,25 @@ data class Plan(
 )
 
 class MainActivity : ComponentActivity() {
+    // bertambah setiap aplikasi kembali tampil, dipakai untuk cek ulang izin
+    private val resumeTick = mutableStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            HomeScreen()
+            HomeScreen(resumeTick = resumeTick.value)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resumeTick.value = resumeTick.value + 1
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen() {
+fun HomeScreen(resumeTick: Int) {
     // 0 = Plan, 1 = FAQ, 2 = Profile
     var selectedTab by remember { mutableStateOf(0) }
 
@@ -89,6 +110,33 @@ fun HomeScreen() {
     var showDialog by remember { mutableStateOf(false) }
     var nameInput by remember { mutableStateOf("") }
     var descInput by remember { mutableStateOf("") }
+
+    // cek izin, dihitung ulang setiap aplikasi kembali tampil
+    val context = LocalContext.current
+    var refresh by remember { mutableStateOf(0) }
+    var permissionDismissed by remember { mutableStateOf(false) }
+
+    val notifLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { refresh = refresh + 1 }
+
+    val overlayOk = remember(resumeTick, refresh) { Settings.canDrawOverlays(context) }
+    val accessibilityOk = remember(resumeTick, refresh) {
+        val enabled = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: ""
+        val me = ComponentName(context, ClickService::class.java)
+        enabled.split(":").any { ComponentName.unflattenFromString(it) == me }
+    }
+    val notifOk = remember(resumeTick, refresh) {
+        Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+    }
+    val allGranted = overlayOk && accessibilityOk && notifOk
 
     Scaffold(
         topBar = {
@@ -220,7 +268,18 @@ fun HomeScreen() {
                                     )
                                     Spacer(modifier = Modifier.height(12.dp))
                                     Button(
-                                        onClick = { /* TODO: edit dan jalankan plan */ },
+                                        onClick = {
+                                            if (overlayOk) {
+                                                // tampilkan panel melayang, lalu sembunyikan aplikasi
+                                                val intent = Intent(context, OverlayService::class.java)
+                                                intent.putExtra("plan_name", plan.name)
+                                                context.startService(intent)
+                                                (context as? Activity)?.moveTaskToBack(true)
+                                            } else {
+                                                // izin overlay belum aktif, munculkan popup izin lagi
+                                                permissionDismissed = false
+                                            }
+                                        },
                                         colors = ButtonDefaults.buttonColors(
                                             containerColor = Color(0xFFEBDDFF),
                                             contentColor = Color(0xFF703810)
@@ -300,5 +359,78 @@ fun HomeScreen() {
                 }
             }
         )
+    }
+
+    // popup izin yang dibutuhkan
+    if (!allGranted && !permissionDismissed) {
+        AlertDialog(
+            onDismissRequest = { permissionDismissed = true },
+            title = { Text("Izin Dibutuhkan") },
+            text = {
+                Column {
+                    Text(
+                        "Aplikasi butuh izin berikut supaya panel bisa tampil di atas aplikasi lain dan bisa menekan layar otomatis.",
+                        fontSize = 13.sp,
+                        color = Color.DarkGray
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    PermissionRow(
+                        "Tampil di atas aplikasi lain",
+                        "Untuk menampilkan panel melayang",
+                        overlayOk
+                    ) {
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:" + context.packageName)
+                        )
+                        context.startActivity(intent)
+                    }
+                    PermissionRow(
+                        "Layanan aksesibilitas",
+                        "Untuk menekan layar otomatis. Kalau tombolnya abu-abu: Info aplikasi, titik tiga, Izinkan setelan terbatas",
+                        accessibilityOk
+                    ) {
+                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    }
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        PermissionRow(
+                            "Notifikasi",
+                            "Penanda saat plan berjalan",
+                            notifOk
+                        ) {
+                            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { permissionDismissed = true }) {
+                    Text("Nanti")
+                }
+            }
+        )
+    }
+}
+
+// satu baris izin: judul, keterangan, dan tombol Aktifkan (atau tulisan Aktif)
+@Composable
+fun PermissionRow(title: String, desc: String, granted: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            Text(desc, color = Color.Gray, fontSize = 12.sp)
+        }
+        if (granted) {
+            Text("Aktif", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+        } else {
+            TextButton(onClick = onClick) {
+                Text("Aktifkan")
+            }
+        }
     }
 }
